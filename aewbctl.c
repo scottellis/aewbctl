@@ -10,6 +10,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#include <signal.h>
 #include <linux/videodev2.h>
 
 #include "isp_user.h"
@@ -24,6 +25,8 @@ int nframes = 4;
 unsigned long gain = 0x20;
 int current_exposure = 10000;
 double target_intensity = 25.0;
+int verbose;
+int shutdown_time;
 
 struct hist_summary {
 	unsigned int median_bin[4];
@@ -250,23 +253,30 @@ static int adjust_exposure(int fd, double avg)
 	int new_exposure;
 	double diff;
 
-	diff = 100.0 * (target_intensity - avg);
+	diff = target_intensity - avg;
 
-	if (abs(diff) < 101.0)
+	if (verbose > 1)
+		printf("raw diff: %3.2lf\n", diff);
+
+	if (abs(diff) < 1.0)
 		return 0;
 
-	diff += (double) current_exposure;
+	if (verbose > 1)
+		printf("current exposure: %d\n", current_exposure);
 
-	new_exposure = (int) diff;
+	new_exposure = (int)((double)current_exposure * (target_intensity / avg));
+	
+	if (verbose > 1)
+		printf("new_exposure: %d\n", new_exposure);
 
 	if (new_exposure < MIN_EXPOSURE || new_exposure > MAX_EXPOSURE)
 		return 0;
-		
-	printf("Adjusting exposure %d to %d\n", current_exposure, new_exposure);
+	
+	if (verbose)	
+		printf("Adjusting exposure %d to %d\n", current_exposure, new_exposure);
 
-	if (!set_exposure(fd, new_exposure)) {
+	if (!set_exposure(fd, new_exposure))
 		current_exposure = new_exposure;
-	}
 
 	return 0;	
 }
@@ -300,7 +310,7 @@ static int open_device(const char *dev_name)
 
 static void main_loop(const char *dev_name)
 {
-	int fd, i;
+	int fd;
 	struct isp_hist_data isp_hist;
 	struct hist_summary hs;
 
@@ -316,25 +326,52 @@ static void main_loop(const char *dev_name)
 	if (get_exposure(fd) < 0)
 		goto main_loop_end;
 		
-	for (i = 0; i < 100; i++) {
+	while (!shutdown_time) {
 		memset(isp_hist.hist_statistics_buf, 0, 4096);
 
 		read_histogram(fd, &isp_hist, &hs);
 
-		printf("summary: median-bins: %3u  %3u  %3u  %3u    avg: %3.2lf\n", 
-			hs.median_bin[0], hs.median_bin[1], hs.median_bin[2], 
-			hs.median_bin[3], hs.avg);
-
+		if (verbose)
+			printf("summary: median-bins: %3u  %3u  %3u  %3u    avg: %3.2lf\n", 
+				hs.median_bin[0], hs.median_bin[1], hs.median_bin[2], 
+				hs.median_bin[3], hs.avg);
 		
 		adjust_exposure(fd, hs.avg);
 
-		msleep(1000);		
+		msleep(100);		
 	}
 
 main_loop_end:
 
 	close(fd);
 	free(isp_hist.hist_statistics_buf);
+}
+
+static void sig_handler(int sig)
+{
+	if (sig == SIGINT || sig == SIGTERM || sig == SIGHUP)
+		shutdown_time = 1;
+}
+ 
+static void install_signal_handlers()
+{
+	struct sigaction sia;
+
+	bzero(&sia, sizeof sia);
+	sia.sa_handler = sig_handler;
+
+	if (sigaction(SIGINT, &sia, NULL) < 0) {
+		perror("sigaction(SIGINT)");
+		exit(1);
+	} 
+	else if (sigaction(SIGTERM, &sia, NULL) < 0) {
+		perror("sigaction(SIGTERM)");
+		exit(1);
+	} 
+	else if (sigaction(SIGHUP, &sia, NULL) < 0) {
+		perror("sigaction(SIGHUP)");
+		exit(1);
+	}
 }
 
 static void usage(FILE *fp, char **argv)
@@ -346,6 +383,7 @@ static void usage(FILE *fp, char **argv)
 		"-b<n>  num histogram bins n=32,64,128 or 256 (default = 128)\n"
 		"-f<n>  num frames to collect (default = 1)\n"
 		"-g<n>  gain in fixed-point 3Q5 format, (default 0x20 = gain of 1.0)\n"
+		"-v	verbose output\n"
 		"-h     print this message\n"
 		"\n",
 		argv[0]);
@@ -357,7 +395,7 @@ int main(int argc, char **argv)
 	char *endp;
 	char dev_name[] = "/dev/video0";
 
-	while ((opt = getopt(argc, argv, "t:b:f:g:h")) != -1) {
+	while ((opt = getopt(argc, argv, "t:b:f:g:vh")) != -1) {
 		switch (opt) {
 		case 't':
 			target_intensity = atof(optarg);
@@ -392,6 +430,10 @@ int main(int argc, char **argv)
 
 			break;
 
+		case 'v':
+			verbose++;
+			break;
+
 		case 'h':
 			usage(stdout, argv);
 			exit(0);
@@ -401,6 +443,8 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 	}
+
+	install_signal_handlers();
 
 	main_loop(dev_name);
 
