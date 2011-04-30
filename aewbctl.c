@@ -308,11 +308,33 @@ static int open_device(const char *dev_name)
 	return fd;
 }
 
+static int do_recover_ops(const char *dev_name)
+{
+	int fd;
+
+	printf("Going into recovery mode avg and old_avg > 254\n");
+	close(fd);
+	msleep(5000);
+
+	fd = open(dev_name,  O_RDWR | O_NONBLOCK, 0);
+
+	if (fd < 0) {
+		perror("open");
+		return fd;
+	}
+
+	set_exposure(fd, 10000);
+	msleep(1000);
+
+	return fd;
+}
+
 static void main_loop(const char *dev_name)
 {
 	int fd;
 	struct isp_hist_data isp_hist;
 	struct hist_summary hs;
+	double old_avg;
 
 	isp_hist.hist_statistics_buf = malloc(4096);
 
@@ -325,6 +347,8 @@ static void main_loop(const char *dev_name)
 
 	if (get_exposure(fd) < 0)
 		goto main_loop_end;
+
+	old_avg = 0.0;
 		
 	while (!shutdown_time) {
 		memset(isp_hist.hist_statistics_buf, 0, 4096);
@@ -335,10 +359,21 @@ static void main_loop(const char *dev_name)
 			printf("summary: median-bins: %3u  %3u  %3u  %3u    avg: %3.2lf\n", 
 				hs.median_bin[0], hs.median_bin[1], hs.median_bin[2], 
 				hs.median_bin[3], hs.avg);
+
 		
 		adjust_exposure(fd, hs.avg);
 
-		msleep(100);		
+		if (old_avg > 254.0 && hs.avg > 254.0) {
+			close(fd);
+			old_avg = 0.0;
+			fd = do_recover_ops(dev_name);
+			if (fd < 0)				
+				break;
+		}
+		else {
+			old_avg = hs.avg;
+			msleep(500);		
+		}
 	}
 
 main_loop_end:
@@ -364,14 +399,6 @@ static void install_signal_handlers()
 		perror("sigaction(SIGINT)");
 		exit(1);
 	} 
-	else if (sigaction(SIGTERM, &sia, NULL) < 0) {
-		perror("sigaction(SIGTERM)");
-		exit(1);
-	} 
-	else if (sigaction(SIGHUP, &sia, NULL) < 0) {
-		perror("sigaction(SIGHUP)");
-		exit(1);
-	}
 }
 
 static void usage(FILE *fp, char **argv)
