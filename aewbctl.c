@@ -312,9 +312,12 @@ static int do_recover_ops(const char *dev_name)
 {
 	int fd;
 
+	if (!verbose)
+		verbose = 1;
+
 	printf("Going into recovery mode avg and old_avg > 254\n");
 	close(fd);
-	msleep(5000);
+	msleep(30000);
 
 	fd = open(dev_name,  O_RDWR | O_NONBLOCK, 0);
 
@@ -372,7 +375,7 @@ static void main_loop(const char *dev_name)
 		}
 		else {
 			old_avg = hs.avg;
-			msleep(500);		
+			msleep(1000);		
 		}
 	}
 
