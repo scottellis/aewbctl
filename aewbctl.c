@@ -24,7 +24,7 @@ int nbins = 256;
 int nframes = 4;
 unsigned long gain = 0x20;
 int current_exposure = 10000;
-double target_intensity = 25.0;
+double target_intensity = 30.0;
 int verbose;
 int shutdown_time;
 
@@ -261,24 +261,55 @@ static int adjust_exposure(int fd, double avg)
 	if (abs(diff) < 1.0)
 		return 0;
 
-	if (verbose > 1)
-		printf("current exposure: %d\n", current_exposure);
-
 	new_exposure = (int)((double)current_exposure * (target_intensity / avg));
-	
-	if (verbose > 1)
-		printf("new_exposure: %d\n", new_exposure);
 
-	if (new_exposure < MIN_EXPOSURE || new_exposure > MAX_EXPOSURE)
-		return 0;
+	if (new_exposure < MIN_EXPOSURE)
+		new_exposure = MIN_EXPOSURE;
+	else if (new_exposure > MAX_EXPOSURE)
+		new_exposure = MAX_EXPOSURE;
 	
-	if (verbose)	
-		printf("Adjusting exposure %d to %d\n", current_exposure, new_exposure);
+	if (new_exposure == current_exposure)
+		return 0;
+
+	if (verbose) {
+		printf("Normal adjust: Target: %3.2lf  Current: %3.2lf  Adjusting %d to %d\n", 
+			target_intensity, avg, current_exposure, new_exposure);
+	}
 
 	if (!set_exposure(fd, new_exposure))
 		current_exposure = new_exposure;
 
 	return 0;	
+}
+
+/*
+  We get values of 255 from the ISP whether we are saturated too bright or 
+  too dark. The normal adjust exposure can handle the too bright case. 
+  The too dark case needs to be handled differently. We take a stab at it here, 
+  trying to guess which of the two conditions we are in based on our current 
+  exposure setting and then forcing a too bright condition if we think we
+  are really too dark.
+*/
+static void adjust_for_saturation(int fd, double avg)
+{
+	int new_exposure;
+
+	// assume we are too dark
+	if (current_exposure < 100000) {
+		// put us into a too bright condition hopefully
+		new_exposure = 100000;
+		
+		if (verbose) {
+			printf("Saturation adjust: Target: %3.2lf Adjusting %d to %d\n", 
+				target_intensity, current_exposure, new_exposure);
+		}
+
+		if (!set_exposure(fd, new_exposure))
+			current_exposure = new_exposure;
+	}
+	else {
+		adjust_exposure(fd, avg);
+	}
 }
 
 static int open_device(const char *dev_name)
@@ -308,36 +339,11 @@ static int open_device(const char *dev_name)
 	return fd;
 }
 
-static int do_recover_ops(const char *dev_name)
-{
-	int fd;
-
-	if (!verbose)
-		verbose = 1;
-
-	printf("Going into recovery mode avg and old_avg > 254\n");
-	close(fd);
-	msleep(30000);
-
-	fd = open(dev_name,  O_RDWR | O_NONBLOCK, 0);
-
-	if (fd < 0) {
-		perror("open");
-		return fd;
-	}
-
-	set_exposure(fd, 10000);
-	msleep(1000);
-
-	return fd;
-}
-
 static void main_loop(const char *dev_name)
 {
-	int fd;
+	int fd, i, saturated, saturation_retries;
 	struct isp_hist_data isp_hist;
 	struct hist_summary hs;
-	double old_avg;
 
 	isp_hist.hist_statistics_buf = malloc(4096);
 
@@ -350,33 +356,45 @@ static void main_loop(const char *dev_name)
 
 	if (get_exposure(fd) < 0)
 		goto main_loop_end;
-
-	old_avg = 0.0;
-		
+	
 	while (!shutdown_time) {
 		memset(isp_hist.hist_statistics_buf, 0, 4096);
 
 		read_histogram(fd, &isp_hist, &hs);
 
-		if (verbose)
-			printf("summary: median-bins: %3u  %3u  %3u  %3u    avg: %3.2lf\n", 
-				hs.median_bin[0], hs.median_bin[1], hs.median_bin[2], 
-				hs.median_bin[3], hs.avg);
+		if (verbose > 1) {
+			printf("summary: median-bins: %3u  %3u  %3u  %3u\n", 
+				hs.median_bin[0], hs.median_bin[1], 
+				hs.median_bin[2], hs.median_bin[3]);
+		}
 
-		
-		adjust_exposure(fd, hs.avg);
+		saturated = 0;
 
-		if (old_avg > 254.0 && hs.avg > 254.0) {
-			close(fd);
-			old_avg = 0.0;
-			fd = do_recover_ops(dev_name);
-			if (fd < 0)				
+		for (i = 0; i < 4; i++) {
+			if (hs.median_bin[i] == 255) {
+				saturated = 1;
 				break;
+			}
+		}
+
+		if (saturated) {
+			// We are ping-ponging on saturation recovery.
+			// Wait a little, maybe the lighting situation will
+			// change.
+			if (saturation_retries > 5) {
+				msleep(15000);
+				saturation_retries = 0;
+			}
+
+			saturation_retries++;
+			adjust_for_saturation(fd, hs.avg);
 		}
 		else {
-			old_avg = hs.avg;
-			msleep(1000);		
+			saturation_retries = 0;
+			adjust_exposure(fd, hs.avg);
 		}
+
+		msleep(1000);		
 	}
 
 main_loop_end:
