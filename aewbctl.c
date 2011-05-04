@@ -232,7 +232,7 @@ static int read_histogram(int fd, struct isp_hist_data *isp_hist, struct hist_su
 		if (!result)
 			break;
 
-		if (errno != EBUSY)
+		if (errno != EBUSY && errno != EINVAL)
 			break;
 
 		msleep(500);
