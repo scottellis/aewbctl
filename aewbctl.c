@@ -268,8 +268,12 @@ static int adjust_exposure(int fd, double avg)
 	else if (new_exposure > MAX_EXPOSURE)
 		new_exposure = MAX_EXPOSURE;
 	
-	if (new_exposure == current_exposure)
+	if (new_exposure == current_exposure) {
+		if (verbose)
+			printf("New exposure same as old: %d\n", new_exposure);
+
 		return 0;
+	}
 
 	if (verbose) {
 		printf("Normal adjust: Target: %3.2lf  Current: %3.2lf  Adjusting %d to %d\n", 
