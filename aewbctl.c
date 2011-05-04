@@ -435,7 +435,7 @@ static void usage(FILE *fp, char **argv)
 		"-b<n>  num histogram bins n=32,64,128 or 256 (default = 128)\n"
 		"-f<n>  num frames to collect (default = 1)\n"
 		"-g<n>  gain in fixed-point 3Q5 format, (default 0x20 = gain of 1.0)\n"
-		"-v	verbose output\n"
+		"-v	verbose output, can be used more then once\n"
 		"-h     print this message\n"
 		"\n",
 		argv[0]);
