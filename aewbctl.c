@@ -409,7 +409,7 @@ main_loop_end:
 
 static void sig_handler(int sig)
 {
-	if (sig == SIGINT || sig == SIGTERM || sig == SIGHUP)
+	if (sig == SIGINT)
 		shutdown_time = 1;
 }
  
