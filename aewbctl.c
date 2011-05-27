@@ -20,20 +20,27 @@
 #define V4L2_MT9P031_RED_GAIN			(V4L2_CID_PRIVATE_BASE + 2)
 #define V4L2_MT9P031_GREEN2_GAIN		(V4L2_CID_PRIVATE_BASE + 3)
 
-int nbins = 256;
-int nframes = 4;
-unsigned long gain = 0x20;
-int current_exposure = 10000;
-double target_intensity = 30.0;
+int nbins;
+int nframes;
+unsigned long gain;
+int current_exposure;
+double target_intensity;
+int timing;
 int verbose;
+int dry_run;
+int dump_bins;
 int shutdown_time;
 
+#define NUM_COLOR_COMPONENTS 4
+
 struct hist_summary {
-	unsigned int median_bin[4];
-	double avg;
+	unsigned int median_bin[NUM_COLOR_COMPONENTS];
+	unsigned int count[NUM_COLOR_COMPONENTS];
+	double avg[NUM_COLOR_COMPONENTS];
+	double overall_avg;
 };
 
-static int msleep(int milliseconds)
+int msleep(int milliseconds)
 {
         struct timespec ts;
 
@@ -47,7 +54,7 @@ static int msleep(int milliseconds)
         return nanosleep(&ts, NULL);
 }
 
-static int xioctl(int fd, int request, void *arg)
+int xioctl(int fd, int request, void *arg)
 {
 	int r;
 
@@ -58,7 +65,7 @@ static int xioctl(int fd, int request, void *arg)
 	return r;
 }
 
-static int get_exposure(int fd)
+int get_exposure(int fd)
 {
 	struct v4l2_control control;
 
@@ -75,7 +82,7 @@ static int get_exposure(int fd)
 	return 0;
 }
 
-static int set_exposure(int fd, int exposure)
+int set_exposure(int fd, int exposure)
 {
 	struct v4l2_control control;
 
@@ -91,7 +98,7 @@ static int set_exposure(int fd, int exposure)
 	return 0;
 }
 
-static void set_gain(int fd, int control_id, int gain)
+void set_gain(int fd, int control_id, int gain)
 {
 	struct v4l2_queryctrl queryctrl;
 	struct v4l2_control control;
@@ -120,11 +127,23 @@ static void set_gain(int fd, int control_id, int gain)
 	}
 }
 
-static int enable_histogram(int fd)
+struct region {
+	unsigned int left;
+	unsigned int right;
+	unsigned int top;
+	unsigned int bottom;
+};
+
+struct region regions[4] = {
+	{ 680, 1880, 360, 1560 },
+	{ 280, 480, 760, 1160 },
+	{ 2280, 2480, 760, 1160 },
+	{ 1080, 1480, 1170, 1270 },
+};
+
+int enable_histogram(int fd)
 {
 	struct isp_hist_config cfg;
-	unsigned int x_start, x_end;
-	unsigned int y_start, y_end;
 	
 	memset(&cfg, 0, sizeof(cfg));
 
@@ -132,11 +151,13 @@ static int enable_histogram(int fd)
 	cfg.input_bit_width = 10;
 
 	cfg.hist_frames = nframes;
+	cfg.num_regions = 1;
 
 	switch (nbins) {
 	case 32:
 		cfg.hist_bins = BINS_32;
 		break;
+
 	case 64:
 		cfg.hist_bins = BINS_64;
 		break;
@@ -148,11 +169,18 @@ static int enable_histogram(int fd)
 	case 256:
 		cfg.hist_bins = BINS_256;
 		break;
-
-	default:
-		printf("Invalid number of bins %d\n", nbins);
-		return -1;
 	}
+
+	cfg.reg0_hor = (regions[0].left << 16) | regions[0].right;
+	cfg.reg0_ver = (regions[0].top << 16) | regions[0].bottom;
+	/*
+	cfg.reg1_hor = (regions[1].left << 16) | regions[1].right;
+	cfg.reg1_ver = (regions[1].top << 16) | regions[1].bottom;
+	cfg.reg2_hor = (regions[2].left << 16) | regions[2].right;
+	cfg.reg2_ver = (regions[2].top << 16) | regions[2].bottom;
+	cfg.reg3_hor = (regions[3].left << 16) | regions[3].right;
+	cfg.reg3_ver = (regions[3].top << 16) | regions[3].bottom;
+	*/
 
 	/* 
 	fixed-point 8-bit values 3Q5, 
@@ -165,18 +193,6 @@ static int enable_histogram(int fd)
 	cfg.wb_gain_B = gain;
 	cfg.wb_gain_BG = gain;
 
-	/* 0 = reg0, 1 = reg0 and reg1, ..., 3 = reg0-reg3 */
-	cfg.num_regions = 0;
-
-	/* packed start [29:16] and end [13:0] pixel positions */ 
-	/* choose a 600x600 pixel region in the center for stats */
-	x_start = 980;
-	x_end = 1579;
-	y_start = 860;
-	y_end = 1259;
-	cfg.reg0_hor = (x_start << 16) | x_end;
-	cfg.reg0_ver = (y_start << 16) | y_end;
-
 	if (-1 == xioctl(fd, VIDIOC_PRIVATE_ISP_HIST_CFG, &cfg)) {
 		perror("VIDIOC_PRIVATE_ISP_HIST_CFG");
 		return -1;
@@ -185,39 +201,77 @@ static int enable_histogram(int fd)
 	return 0;
 }
 
-static void get_hist_summary(unsigned int *d, struct hist_summary *hs)
+void get_hist_summary(unsigned int *d, struct hist_summary *hs)
 {
 	int i, j;
-	unsigned int half, sum;
 	unsigned int *p;
+	double bin_size;
+	double half;
 
-	hs->avg = 0.0;
+	hs->overall_avg = 0.0;
 
-	for (j = 0; j < 4; j++) {
+	bin_size = 256.0 / nbins;
+
+	for (j = 0; j < NUM_COLOR_COMPONENTS; j++) {
 		p = &d[j * nbins];
 
-		sum = 0;
-		half = 0;
+		hs->avg[j] = 0.0;
+		hs->count[j] = 0;
+		half = 0.0;
 
 		for (i = 0; i < nbins; i++) {
-			sum += p[i];
+			hs->avg[j] += (p[i] * i * bin_size) + (p[i] * (bin_size / 2));
+			hs->count[j] += p[i];
 		}
 
 		for (i = 0; i < nbins; i++) {
-			half += p[i];
+			half += (p[i] * i) + (p[i] * (bin_size / 2));
 		
-			if (half > sum / 2)
+			if (half > hs->avg[j] / 2)
 				break;	
 		}
 
 		hs->median_bin[j] = i;
-		hs->avg += i;
+
+		if (hs->count[j] > 0)
+			hs->avg[j] /= hs->count[j];
+
+		hs->overall_avg += hs->avg[j];
 	}
 
-	hs->avg /= 4.0;
+	hs->overall_avg /= NUM_COLOR_COMPONENTS;
 }
 
-static int read_histogram(int fd, struct isp_hist_data *isp_hist, struct hist_summary *hs)
+void dump_histogram_bins(unsigned int *d, struct hist_summary *hs)
+{
+	int i, j;
+	unsigned int *p;
+
+	for (j = 0; j < NUM_COLOR_COMPONENTS; j++) {
+		printf("\nComponent[%d]: Avg: %0.2lf  Median Bin: %d  Count: %u", 
+				j, hs->avg[j], hs->median_bin[j], hs->count[j]);
+
+		if (dump_bins) {
+			p = &d[j * nbins];
+
+			for (i = 0; i < nbins; i++) {
+				if ((i % 16) == 0)
+					printf("\n   %6u", p[i]);
+				else 
+					printf("   %6u", p[i]);
+			}
+		
+			printf("\n");
+		}
+	}
+
+	if (dump_bins)
+		printf("\n\n");
+	else
+		printf("\n");
+}
+
+int read_histogram(int fd, struct isp_hist_data *isp_hist, struct hist_summary *hs)
 {	
 	int result, i;
 
@@ -235,20 +289,25 @@ static int read_histogram(int fd, struct isp_hist_data *isp_hist, struct hist_su
 		if (errno != EBUSY && errno != EINVAL)
 			break;
 
-		msleep(500);
+		msleep(200);
 	}
 
-	if (result)
+	if (result) {
 		perror("VIDIOC_PRIVATE_ISP_HIST_REQ");
-	else
+	}
+	else {
 		get_hist_summary(isp_hist->hist_statistics_buf, hs);
+
+		if (verbose)
+			dump_histogram_bins(isp_hist->hist_statistics_buf, hs);
+	}
 
 	return result;
 }
 
 #define MIN_EXPOSURE 63
-#define MAX_EXPOSURE 120000
-static int adjust_exposure(int fd, double avg)
+#define MAX_EXPOSURE 140000
+int adjust_exposure(int fd, double avg)
 {
 	int new_exposure;
 	double diff;
@@ -275,48 +334,22 @@ static int adjust_exposure(int fd, double avg)
 		return 0;
 	}
 
-	if (verbose) {
-		printf("Normal adjust: Target: %3.2lf  Current: %3.2lf  Adjusting %d to %d\n", 
-			target_intensity, avg, current_exposure, new_exposure);
-	}
+	if (verbose)
+		printf("Adjusting %d to %d\n", current_exposure, new_exposure);
 
-	if (!set_exposure(fd, new_exposure))
-		current_exposure = new_exposure;
+	if (dry_run) {
+		/* during testing often changing externally, so need to update */
+		get_exposure(fd);
+	} 
+	else {
+		if (!set_exposure(fd, new_exposure))
+			current_exposure = new_exposure;
+	}
 
 	return 0;	
 }
 
-/*
-  We get values of 255 from the ISP whether we are saturated too bright or 
-  too dark. The normal adjust exposure can handle the too bright case. 
-  The too dark case needs to be handled differently. We take a stab at it here, 
-  trying to guess which of the two conditions we are in based on our current 
-  exposure setting and then forcing a too bright condition if we think we
-  are really too dark.
-*/
-static void adjust_for_saturation(int fd, double avg)
-{
-	int new_exposure;
-
-	// assume we are too dark
-	if (current_exposure < 100000) {
-		// put us into a too bright condition hopefully
-		new_exposure = 100000;
-		
-		if (verbose) {
-			printf("Saturation adjust: Target: %3.2lf Adjusting %d to %d\n", 
-				target_intensity, current_exposure, new_exposure);
-		}
-
-		if (!set_exposure(fd, new_exposure))
-			current_exposure = new_exposure;
-	}
-	else {
-		adjust_exposure(fd, avg);
-	}
-}
-
-static int open_device(const char *dev_name)
+int open_device(const char *dev_name)
 {
 	int fd;
 	struct stat st; 
@@ -343,9 +376,9 @@ static int open_device(const char *dev_name)
 	return fd;
 }
 
-static void main_loop(const char *dev_name)
+void main_loop(const char *dev_name)
 {
-	int fd, i, saturated, saturation_retries;
+	int fd;
 	struct isp_hist_data isp_hist;
 	struct hist_summary hs;
 
@@ -362,43 +395,16 @@ static void main_loop(const char *dev_name)
 		goto main_loop_end;
 	
 	while (!shutdown_time) {
-		memset(isp_hist.hist_statistics_buf, 0, 4096);
+		memset(isp_hist.hist_statistics_buf, 0xff, 4096);
 
 		read_histogram(fd, &isp_hist, &hs);
 
-		if (verbose > 1) {
-			printf("summary: median-bins: %3u  %3u  %3u  %3u\n", 
-				hs.median_bin[0], hs.median_bin[1], 
-				hs.median_bin[2], hs.median_bin[3]);
-		}
+		if (verbose)
+			printf("Target: %3.2lf  Current: %3.2lf\n", 
+				target_intensity, hs.overall_avg);
 
-		saturated = 0;
-
-		for (i = 0; i < 4; i++) {
-			if (hs.median_bin[i] == 255) {
-				saturated = 1;
-				break;
-			}
-		}
-
-		if (saturated) {
-			// We are ping-ponging on saturation recovery.
-			// Wait a little, maybe the lighting situation will
-			// change.
-			if (saturation_retries > 5) {
-				msleep(15000);
-				saturation_retries = 0;
-			}
-
-			saturation_retries++;
-			adjust_for_saturation(fd, hs.avg);
-		}
-		else {
-			saturation_retries = 0;
-			adjust_exposure(fd, hs.avg);
-		}
-
-		msleep(1000);		
+		adjust_exposure(fd, hs.overall_avg);
+		msleep(timing * 1000);		
 	}
 
 main_loop_end:
@@ -407,13 +413,13 @@ main_loop_end:
 	free(isp_hist.hist_statistics_buf);
 }
 
-static void sig_handler(int sig)
+void sig_handler(int sig)
 {
 	if (sig == SIGINT)
 		shutdown_time = 1;
 }
  
-static void install_signal_handlers()
+void install_signal_handlers()
 {
 	struct sigaction sia;
 
@@ -426,16 +432,32 @@ static void install_signal_handlers()
 	} 
 }
 
-static void usage(FILE *fp, char **argv)
+void summarize_start()
+{
+	printf("\nStart Conditions:\n");
+	printf("  nbins     = %d\n", nbins);
+	printf("  nframes   = %d\n", nframes);
+	printf("  gain      = 0x%04lX\n", gain);
+	printf("  target    = %3.2lf\n", target_intensity);
+	printf("  timing    = %d\n", timing);
+	printf("  verbose   = %d\n", verbose);
+	printf("  dry_run   = %d\n", dry_run);
+	printf("  dump_bins = %d\n\n", dump_bins);	
+}
+
+void usage(FILE *fp, char **argv)
 {
 	fprintf (fp,
 		"Usage: %s [options]\n\n"
 		"Options:\n"
-		"-t<n>  target intensity 0-255\n"
-		"-b<n>  num histogram bins n=32,64,128 or 256 (default = 256)\n"
-		"-f<n>  num frames to collect (default = 4)\n"
-		"-g<n>  gain in fixed-point 3Q5 format, (default 0x20 = gain of 1.0)\n"
-		"-v	verbose output, can be used more then once\n"
+		"-i<n>  target intensity 0-255, default is 50\n"
+                "-t<n>  adjustment frequency in seconds (range 1-30, default is 1)\n"
+		"-b<n>  num histogram bins n=32,64,128 or 256 (default = 32)\n"
+		"-f<n>  num frames to collect (default = 1)\n"
+		"-g<n>  gain in fixed-point 3Q5 format, (default 0x40 = gain of 2.0)\n"
+		"-v     verbose output, can be used more then once to get more info\n"
+		"-n     dry run, no adjustments made, implies at least one -v\n"
+		"-d     dump bins\n"
 		"-h     print this message\n"
 		"\n",
 		argv[0]);
@@ -443,13 +465,19 @@ static void usage(FILE *fp, char **argv)
 
 int main(int argc, char **argv)
 {
-	int opt;
+	int opt, n;
 	char *endp;
 	char dev_name[] = "/dev/video0";
 
-	while ((opt = getopt(argc, argv, "t:b:f:g:vh")) != -1) {
+	nbins = 32;
+	nframes = 1;
+	gain = 0x20;	
+	target_intensity = 50.0;
+	timing = 1;
+
+	while ((opt = getopt(argc, argv, "i:t:b:f:g:vndh")) != -1) {
 		switch (opt) {
-		case 't':
+		case 'i':
 			target_intensity = atof(optarg);
 
 			if (target_intensity < 0.0 || target_intensity > 255.0) {
@@ -462,8 +490,28 @@ int main(int argc, char **argv)
 
 			break;
 
+		case 't':
+			timing = atoi(optarg);
+
+			if (timing < 0 || timing > 30) {
+				printf("Invalid adjustment frequency: %d\n", 
+					timing);
+
+				usage(stderr, argv);
+				exit(1);
+			}
+
+			break;
+
 		case 'b':
-			nbins = atoi(optarg);				
+			nbins = atoi(optarg);
+
+			if (nbins != 32 && nbins != 64 && nbins != 128 && nbins != 256) {
+				printf("Invalid bins: %d\n", n);
+				usage(stderr, argv);
+				exit(1);
+			}
+	
 			break;
 
 		case 'f':
@@ -474,8 +522,7 @@ int main(int argc, char **argv)
 			gain = strtoul(optarg, &endp, 0);
 
 			if (gain < 1 || gain > 255) {
-				printf("Invalid gain %lu  Valid range 0-255\n", 
-					gain);
+				printf("Invalid gain %lu\n", gain);
 				usage(stderr, argv);
 				exit(1);
 			}
@@ -484,6 +531,14 @@ int main(int argc, char **argv)
 
 		case 'v':
 			verbose++;
+			break;
+
+		case 'n':
+			dry_run = 1;
+			break;
+
+		case 'd':
+			dump_bins = 1;
 			break;
 
 		case 'h':
@@ -496,7 +551,12 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (dry_run && !verbose)
+		verbose = 1;
+
 	install_signal_handlers();
+
+	summarize_start();
 
 	main_loop(dev_name);
 
