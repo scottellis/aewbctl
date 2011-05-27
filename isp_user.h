@@ -192,14 +192,14 @@ struct isp_hist_config {
 	__u16 wb_gain_B;	/* White Balance Field-to-Pattern Assignments */
 	__u16 wb_gain_BG;	/* White Balance Field-to-Pattern Assignments */
 	__u8 num_regions;		/* number of regions to be configured */
-	__u16 reg0_hor;		/* Region 0 size and position */
-	__u16 reg0_ver;		/* Region 0 size and position */
-	__u16 reg1_hor;		/* Region 1 size and position */
-	__u16 reg1_ver;		/* Region 1 size and position */
-	__u16 reg2_hor;		/* Region 2 size and position */
-	__u16 reg2_ver;		/* Region 2 size and position */
-	__u16 reg3_hor;		/* Region 3 size and position */
-	__u16 reg3_ver;		/* Region 3 size and position */
+	__u32 reg0_hor;		/* Region 0 size and position */
+	__u32 reg0_ver;		/* Region 0 size and position */
+	__u32 reg1_hor;		/* Region 1 size and position */
+	__u32 reg1_ver;		/* Region 1 size and position */
+	__u32 reg2_hor;		/* Region 2 size and position */
+	__u32 reg2_ver;		/* Region 2 size and position */
+	__u32 reg3_hor;		/* Region 3 size and position */
+	__u32 reg3_ver;		/* Region 3 size and position */
 };
 
 struct isp_hist_data {
