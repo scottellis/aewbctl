@@ -11,7 +11,7 @@ STAGEDIR = $(OETMP)/sysroots/armv7a-angstrom-linux-gnueabi/usr
 
 CC = $(TOOLDIR)/arm-angstrom-linux-gnueabi-gcc
 
-CFLAGS = -Wall
+CFLAGS = -Wall -O2
 
 LIBDIR = $(STAGEDIR)/lib
 
