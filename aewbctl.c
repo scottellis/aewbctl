@@ -29,7 +29,7 @@ int timing;
 int verbose;
 int dry_run;
 int dump_bins;
-int shutdown_time;
+volatile int shutdown_time;
 
 #define NUM_COLOR_COMPONENTS 4
 
@@ -465,7 +465,7 @@ void usage(FILE *fp, char **argv)
 
 int main(int argc, char **argv)
 {
-	int opt, n;
+	int opt;
 	char *endp;
 	char dev_name[] = "/dev/video0";
 
@@ -507,7 +507,7 @@ int main(int argc, char **argv)
 			nbins = atoi(optarg);
 
 			if (nbins != 32 && nbins != 64 && nbins != 128 && nbins != 256) {
-				printf("Invalid bins: %d\n", n);
+				printf("Invalid bins: %d\n", nbins);
 				usage(stderr, argv);
 				exit(1);
 			}
